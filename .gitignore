@@ -1,0 +1,9 @@
+# Διαπιστευτήρια συνεδρίας ΟΣΔΔΥ. Δεν ανεβαίνουν ποτέ, ο repo είναι δημόσιος.
+cookie.txt
+*cookie*.txt
+links.tsv
+lipseis/
+
+# Προσωρινά της Python
+__pycache__/
+*.pyc
