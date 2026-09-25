@@ -32,6 +32,7 @@ PROTHEMA = "Sakkoulas-Online.gr - "
 SKOUPIDIA = (
     "Όροι χρήσης", "Πολιτική απορρήτου", "Χρήση Cookies",
     "Εκδόσεις Σάκκουλα", "Σύνδεση", "Εγγραφή", "Αναζήτηση",
+    "« Προηγούμενο", "Επόμενο »", "Προηγούμενο »", "« Επόμενο",
 )
 
 AGNOOUNTAI = {"script", "style", "button", "select", "option", "svg", "noscript"}
