@@ -34,6 +34,14 @@ from html.parser import HTMLParser
 
 PROTHEMA = "Sakkoulas-Online.gr - "
 
+# Το αδιάσπαστο κενό U+00A0 δεν γράφεται ποτέ ως χαρακτήρας. Μέσα στον κώδικα
+# είναι αόρατο, οπότε μια αντιγραφή που το μετατρέπει σε απλό κενό αχρηστεύει
+# σιωπηλά την αντικατάσταση, χωρίς κανένα σφάλμα. Ούτε γράφεται με ακολουθία
+# διαφυγής unicode, διότι αυτή αποκωδικοποιείται όταν το αρχείο περνά μέσα από
+# JSON και ο χαρακτήρας επανέρχεται. Το chr() είναι καθαρά ASCII, δεν περιέχει
+# τίποτε που να μπορεί να ερμηνευθεί από ενδιάμεση κωδικοποίηση, και επιβιώνει.
+ASTENO_KENO = chr(0x00a0)
+
 # Γραμμές του υποσέλιδου που μπαίνουν στο κείμενο και δεν ανήκουν σε αυτό.
 SKOUPIDIA = (
     "Όροι χρήσης", "Πολιτική απορρήτου", "Χρήση Cookies",
@@ -101,7 +109,7 @@ class Anagnostis(HTMLParser):
 
 def katharo(s):
     s = html.unescape(s)
-    s = s.replace(" ", " ")
+    s = s.replace(ASTENO_KENO, " ")
     s = re.sub(r"[ \t]+", " ", s)
     grammes = [g.strip() for g in s.split("\n")]
     out = []
@@ -147,7 +155,7 @@ def analyse(path):
 
     m = re.search(r"<title[^>]*>(.*?)</title>", h, re.S | re.I)
     titlos = html.unescape(re.sub(r"\s+", " ", m.group(1))).strip() if m else ""
-    titlos = titlos.replace(" ", " ")
+    titlos = titlos.replace(ASTENO_KENO, " ")
 
     p = Anagnostis()
     try:
