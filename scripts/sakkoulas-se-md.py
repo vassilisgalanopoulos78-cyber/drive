@@ -17,6 +17,12 @@
     python3 sakkoulas-se-md.py <φάκελος>            (μόνο δοκιμή)
 
 Χωρίς --out δεν γράφεται τίποτε, εμφανίζεται μόνο τι θα παραγόταν.
+
+Η μετατροπή είναι επαναλήψιμη. Αν το αρχείο προορισμού υπάρχει ήδη με
+ταυτόσημο περιεχόμενο, παραλείπεται, ώστε να μπορεί το script να τρέχει
+κάθε νύχτα χωρίς να πολλαπλασιάζει τα ίδια κείμενα. Μόνο όταν υπάρχει
+ομώνυμο αρχείο με διαφορετικό περιεχόμενο γράφεται χωριστό, με κατάληξη
+«(1)», «(2)», και αναφέρεται.
 """
 
 import argparse
@@ -117,12 +123,20 @@ def katharo(s):
 
 
 def onoma_arxeiou(titlos):
+    """Όνομα αρχείου από τον τίτλο της σελίδας.
+
+    Η σειρά των αντικαταστάσεων έχει σημασία. Η άνω στιγμή απαγορεύεται στα
+    ονόματα των Windows και αφαιρείται, ώστε το «σε: ΔιΔικ 6/2022» να δίνει
+    «σε ΔιΔικ 6-2022» και όχι «σε_ ΔιΔικ 6-2022». Ο κανόνας πρέπει να μένει
+    σταθερός, διότι από αυτόν κρίνεται αν ένα κείμενο έχει ήδη μετατραπεί.
+    """
     s = titlos
     if s.startswith(PROTHEMA):
         s = s[len(PROTHEMA):]
     s = s.replace(".htm", "").strip()
-    s = s.replace("/", "-").replace("σε_", "σε ").replace("σχόλιο_", "σχόλιο ")
-    s = re.sub(r'[\\:*?"<>|]+', "_", s)
+    s = s.replace("/", "-").replace(":", "")
+    s = s.replace("σε_", "σε ").replace("σχόλιο_", "σχόλιο ")
+    s = re.sub(r'[\\*?"<>|]+', "_", s)
     s = re.sub(r"\s+", " ", s).strip(" .")
     return (s[:150] or "χωρίς τίτλο") + ".md"
 
@@ -180,6 +194,8 @@ def main(argv=None):
     ap.add_argument("--out", help="φάκελος προορισμού, αλλιώς μόνο δοκιμή")
     ap.add_argument("--elaxisto", type=int, default=3,
                     help="ελάχιστες γραμμές για να θεωρηθεί έγκυρο (προεπιλογή 3)")
+    ap.add_argument("--katalogos",
+                    help="αρχείο TSV με την αντιστοίχιση πηγής και αποτελέσματος")
     args = ap.parse_args(argv)
 
     arxeia = []
@@ -191,9 +207,10 @@ def main(argv=None):
                 if fn.lower().endswith((".htm", ".html")):
                     arxeia.append(os.path.join(root, fn))
 
-    ok = ftoxa = sfalmata = 0
+    ok = ftoxa = sfalmata = ypirxan = paralliles = 0
     if args.out:
         os.makedirs(args.out, exist_ok=True)
+    grammes_katalogou = []
 
     for path in arxeia:
         rec = analyse(path)
@@ -207,21 +224,56 @@ def main(argv=None):
             ftoxa += 1
             continue
         onoma = onoma_arxeiou(rec["titlos"] or os.path.basename(path))
+        keimeno = se_markdown(rec)
         if args.out:
             stoxos = os.path.join(args.out, onoma)
-            n = 1
+            katastasi = "νέο"
+            # Επαναλήψιμη μετατροπή. Ταυτόσημο αρχείο παραλείπεται, ομώνυμο με
+            # διαφορετικό περιεχόμενο γράφεται χωριστά και αναφέρεται.
             while os.path.exists(stoxos):
+                try:
+                    with open(stoxos, encoding="utf-8") as fh:
+                        palio = fh.read()
+                except OSError:
+                    palio = None
+                if palio == keimeno:
+                    katastasi = "ήδη υπάρχει"
+                    break
                 riza, ext = os.path.splitext(onoma)
-                stoxos = os.path.join(args.out, "%s (%d)%s" % (riza, n, ext))
-                n += 1
-            with open(stoxos, "w", encoding="utf-8") as fh:
-                fh.write(se_markdown(rec))
+                n = 1
+                while True:
+                    ypopsifio = os.path.join(args.out, "%s (%d)%s" % (riza, n, ext))
+                    if ypopsifio == stoxos:
+                        n += 1
+                        continue
+                    stoxos = ypopsifio
+                    break
+                katastasi = "ομώνυμο με άλλο περιεχόμενο"
+            if katastasi == "ήδη υπάρχει":
+                ypirxan += 1
+            else:
+                if katastasi == "ομώνυμο με άλλο περιεχόμενο":
+                    sys.stderr.write("ΟΜΩΝΥΜΟ %s, γράφτηκε ως %s\n"
+                                     % (onoma, os.path.basename(stoxos)))
+                    paralliles += 1
+                with open(stoxos, "w", encoding="utf-8") as fh:
+                    fh.write(keimeno)
+                ok += 1
+            grammes_katalogou.append("%s\t%s\t%d\t%s"
+                                     % (path, os.path.basename(stoxos),
+                                        len(keimeno.encode("utf-8")), katastasi))
         else:
             sys.stdout.write("%s  (%d γραμμές)\n" % (onoma, len(rec["grammes"])))
-        ok += 1
+            ok += 1
 
-    sys.stderr.write("\nΑρχεία: %d, μετατράπηκαν: %d, χωρίς περιεχόμενο: %d, σφάλματα: %d\n"
-                     % (len(arxeia), ok, ftoxa, sfalmata))
+    if args.katalogos and grammes_katalogou:
+        with open(args.katalogos, "w", encoding="utf-8") as fh:
+            fh.write("pigi\tapotelesma\tbytes\tkatastasi\n")
+            fh.write("\n".join(grammes_katalogou) + "\n")
+
+    sys.stderr.write("\nΑρχεία: %d, μετατράπηκαν: %d, υπήρχαν ήδη: %d, "
+                     "ομώνυμα με άλλο περιεχόμενο: %d, χωρίς περιεχόμενο: %d, σφάλματα: %d\n"
+                     % (len(arxeia), ok, ypirxan, paralliles, ftoxa, sfalmata))
     if not args.out:
         sys.stderr.write("Δοκιμή μόνο. Με --out <φάκελος> γράφονται τα αρχεία.\n")
     else:
