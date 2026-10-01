@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
-"""Μετονομασία και μετατροπή σε PDF των σελίδων του Qualex που αποθηκεύει ο χρήστης.
+"""Μετονομασία και μετατροπή σε Markdown (ή σε PDF) των σελίδων του Qualex που αποθηκεύει ο χρήστης.
 
 Ο φυλλομετρητής αποθηκεύει κάθε άρθρο του Qualex ως .htm με φάκελο «_files» δίπλα,
 με τυχαίο όνομα, με όλο το μενού, τα cookies και το όνομα του συνδεδεμένου λογαριασμού
 στην κεφαλίδα. Το script κρατά μόνο τα στοιχεία του άρθρου (τίτλος, συγγραφέας,
 πηγή, ημερομηνία, περίληψη, σχετική νομοθεσία και νομολογία) και το κείμενο του
-τμήματος «Κείμενο», το γράφει σε PDF με το LibreOffice και του δίνει όνομα κατά τη
-μορφή των υπολοίπων άρθρων, «<Περιοδικό> <έτος> <Επώνυμο> - <Τίτλος>.pdf».
+τμήματος «Κείμενο», το γράφει σε Markdown, ή με --pdf σε PDF με το LibreOffice, και
+του δίνει όνομα κατά τη μορφή των υπολοίπων άρθρων, «<Περιοδικό> <έτος> <Επώνυμο> -
+<Τίτλος>.md» (οδηγία του χρήστη της 1.10.2026, «Ας είναι markdown ό,τι βολεύει»).
 
-Το PDF γράφεται μόνο αν περιέχει τουλάχιστον το 90% των λέξεων πέντε και περισσότερων
+Το αρχείο γράφεται μόνο αν περιέχει τουλάχιστον το 90% των λέξεων πέντε και περισσότερων
 γραμμάτων του κειμένου της σελίδας. Με --apply το .htm και ο φάκελος «_files» του
 σβήνονται (στο G: του Google Drive πηγαίνουν στον κάδο, όπου μένουν τριάντα ημέρες).
 Χωρίς --apply γίνεται μόνο έλεγχος. Οι φάκελοι υποθέσεων (cases-folders.txt) δεν
 αγγίζονται, ούτε σελίδες που έχουν ήδη εγγραφή στο manifest.tsv, τις οποίες χειρίζεται
 το web-to-pdf.py με επανασύνδεση της ταυτότητας. Κάθε ενέργεια γράφεται στο
-qualex-to-pdf-log.tsv.
+qualex-se-md-log.tsv. Με --md-out ΑΡΧΕΙΟ μετατρέπει μία μόνο σελίδα, χωρίς να σβήσει
+τίποτε (χρήσιμο όπου το Drive δεν είναι τοπικό και το αποτέλεσμα ανεβαίνει αλλιώς).
 
 Χρήση:
-  python qualex-to-pdf.py [ΡΙΖΑ ...] [--apply] [--cases cases-folders.txt]
-                          [--manifest manifest.tsv] [--log qualex-to-pdf-log.tsv]
+  python qualex-se-md.py [ΡΙΖΑ ...] [--apply] [--pdf] [--cases cases-folders.txt]
+                         [--manifest manifest.tsv] [--log qualex-se-md-log.tsv]
+  python qualex-se-md.py ΣΕΛΙΔΑ.htm --md-out ΑΡΧΕΙΟ.md
 Τρέχει στην ενημέρωση πριν από το drive-index.sh, ώστε οι σελίδες να ευρετηριάζονται
-κατευθείαν ως PDF.
+κατευθείαν στη νέα τους μορφή.
 """
 import argparse
 import datetime
@@ -216,6 +219,188 @@ def build_html(meta):
     return "\n".join(parts)
 
 
+class MdWriter(HTMLParser):
+    """Από το καθαρισμένο HTML σε Markdown: έντονα, πλάγια, παράγραφοι και πίνακες."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.blocks, self.cur = [], []
+        self.table = None
+        self.row = None
+        self.cell = None
+
+    def _buf(self):
+        return self.cell if self.cell is not None else self.cur
+
+    def _flush(self):
+        text = md_inline("".join(self.cur))
+        if text:
+            self.blocks.append(text)
+        self.cur = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("strong", "b"):
+            self._buf().append("\x01")
+        elif tag in ("em", "i"):
+            self._buf().append("\x02")
+        elif tag == "br" or tag in ("p", "li", "blockquote") or tag.startswith("h"):
+            if self.cell is not None:
+                self.cell.append(" ")
+            else:
+                self._flush()
+        elif tag == "table":
+            self._flush()
+            self.table = []
+        elif tag == "tr" and self.table is not None:
+            self.row = []
+        elif tag in ("td", "th") and self.row is not None:
+            self.cell = []
+
+    def handle_endtag(self, tag):
+        if tag in ("strong", "b"):
+            self._buf().append("\x01")
+        elif tag in ("em", "i"):
+            self._buf().append("\x02")
+        elif tag in ("p", "li", "blockquote") or (tag.startswith("h") and tag[1:].isdigit()):
+            if self.cell is None:
+                self._flush()
+        elif tag in ("td", "th") and self.cell is not None:
+            self.row.append(md_inline("".join(self.cell)).replace("|", "\\|"))
+            self.cell = None
+        elif tag == "tr" and self.row is not None:
+            if any(self.row):
+                self.table.append(self.row)
+            self.row = None
+        elif tag == "table" and self.table is not None:
+            self.blocks.extend(md_table(self.table))
+            self.table = None
+
+    def handle_data(self, data):
+        self._buf().append(data)
+
+    def result(self):
+        self._flush()
+        return self.blocks
+
+
+def md_inline(text):
+    """Έντονα και πλάγια χωρίς κενά μέσα στους δείκτες, ενιαία κενά, διαφυγή αρχής γραμμής."""
+    text = re.sub(r"\s+", " ", text)
+    for mark, md in (("\x01", "**"), ("\x02", "*")):
+        parts = text.split(mark)
+        out = parts[0]
+        for k in range(1, len(parts), 2):
+            inner = parts[k]
+            rest = parts[k + 1] if k + 1 < len(parts) else ""
+            core = inner.strip()
+            if core:
+                lead = " " if inner[:1].isspace() else ""
+                trail = " " if inner[-1:].isspace() else ""
+                out += lead + md + core + md + trail + rest
+            else:
+                out += inner + rest
+        text = out
+    text = re.sub(r"\*\*\s*\*\*", " ", text)
+    text = re.sub(r" {2,}", " ", text).strip()
+    text = re.sub(r"^([-+*])(?=\s)", r"\\\1", text)
+    text = re.sub(r"^([#>])", r"\\\1", text)
+    return re.sub(r"^(\d+)\. ", r"\1\\. ", text)
+
+
+def md_table(rows):
+    if all(len(r) == 1 for r in rows):
+        return [r[0] for r in rows if r[0]]
+    width = max(len(r) for r in rows)
+    rows = [r + [""] * (width - len(r)) for r in rows]
+    out = ["| " + " | ".join(rows[0]) + " |", "|" + " --- |" * width]
+    out += ["| " + " | ".join(r) + " |" for r in rows[1:]]
+    return ["\n".join(out)]
+
+
+PAGE_RE = re.compile(r"Σελ\.\s?(\d+)(\s*)(.*)", re.S)
+SENTENCE_END = tuple(".;:!?»)…\"'")
+
+
+def page_markers(blocks):
+    """Οι ενδείξεις «Σελ. N» του Qualex αρχίζουν νέα γραμμή και κόβουν πρόταση ή και λέξη.
+    Γίνονται δείκτες <!-- σελ. N -->, με επανένωση της πρότασης και της λέξης."""
+    out, found = [], False
+    vocab = {}
+    for w in re.findall(r"[^\W\d_]+", " ".join(blocks).lower()):
+        vocab[w] = vocab.get(w, 0) + 1
+
+    def fragment(w):
+        w = re.sub(r"[^\w]", "", w.lower())
+        return bool(w) and vocab.get(w, 0) <= 1
+    def cut_greek(w):
+        """Ελληνική λέξη που δεν στέκει μόνη: πολυσύλλαβη χωρίς τόνο ή μονοσύλλαβη με τόνο."""
+        w = re.sub(r"[^\w]", "", w)
+        if not w or not re.fullmatch(r"[α-ωάέήίόύώϊϋΐΰς]+", w) or not fragment(w):
+            return False
+        syll = len(re.findall(r"[αεηιουωάέήίόύώϊϋΐΰ]+", w))
+        accent = bool(re.search(r"[άέήίόύώΐΰ]", w))
+        return (syll >= 2 and not accent) or (syll == 1 and accent and w not in ("ή", "πώς", "πού"))
+    for b in blocks:
+        m = PAGE_RE.match(b)
+        if not m or not out:
+            out.append(b)
+            continue
+        found = True
+        num, space, rest = m.groups()
+        mark = "<!-- σελ. %s -->" % num
+        prev = out[-1]
+        if prev.rstrip().endswith(SENTENCE_END):
+            out.append((mark + " " + rest).strip())
+        elif rest[:1].islower() and (not space or cut_greek(prev.split()[-1])
+                                     or (fragment(prev.split()[-1]) and fragment(rest.split()[0]))):
+            # Λέξη κομμένη στην αλλαγή σελίδας, χωρίς κενό μετά τον αριθμό ή με δύο κομμάτια
+            # που δεν απαντούν αλλού στο κείμενο («συμπε» / «ριλαμβανομένων»).
+            word, _, tail = rest.partition(" ")
+            out[-1] = prev + word + " " + mark + (" " + tail if tail else "")
+        else:
+            out[-1] = prev.rstrip() + " " + mark + (" " + rest if rest else "")
+    return out, found
+
+
+def build_md(meta, stamp):
+    src = ", ".join(s.replace(" , ", ", ") for s in meta["source"])
+    lines = ["# " + md_inline(meta["title"]), ""]
+    for label, key in (("Συγγραφέας", "author"), ("Πηγή", None), ("Είδος", "kind"),
+                       ("Ημ. δημοσίευσης", "date"), ("Αρ. λέξεων", "words")):
+        value = src if key is None else meta.get(key, "")
+        if value:
+            lines += ["**%s:** %s" % (label, md_inline(value)), ""]
+    w = MdWriter()
+    w.feed(meta["body_html"])
+    w.close()
+    blocks, found = page_markers(w.result())
+    first = re.search(r"σελ\.\s*(\d+)", src)
+    if found:
+        pages = ("Οι αλλαγές σελίδας του περιοδικού σημειώνονται με δείκτες «σελ. N» (σχόλια HTML), "
+                 "στο σημείο όπου τις δίνει η σελίδα, και ελέγχονται στο έντυπο πριν από παράθεση.")
+        if first:
+            blocks.insert(0, "<!-- σελ. %s -->" % first.group(1))
+    else:
+        pages = ("Η σελίδα δεν δίνει τη σελιδαρίθμηση του περιοδικού μέσα στο κείμενο, οπότε πριν από "
+                 "παράθεση σε δικόγραφο ή γνωμοδότηση η σελίδα ελέγχεται στο έντυπο.")
+    lines += ["*Μετατροπή από αποθηκευμένη σελίδα της ΤΝΠ Qualex στις %s με το qualex-se-md.py. %s*"
+              % (stamp[:10], pages), ""]
+    if meta["summary"]:
+        lines += ["## Περίληψη", "", md_inline(" ".join(meta["summary"])), ""]
+    if meta["related"]:
+        lines += ["## " + " και ".join(meta["related_heads"]), ""]
+        for r in meta["related"]:
+            lines += [md_inline(r), ""]
+    lines += ["## Κείμενο", ""]
+    for b in blocks:
+        lines += [b, ""]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def md_name(meta):
+    return pdf_name(meta)[:-4] + ".md"
+
+
 def find_converters():
     """Πρώτα το LibreOffice, όπως στο web-to-pdf.py, και εφεδρικά Chromium (μεταβλητή CHROME)."""
     soffice = next((c for c in (os.environ.get("SOFFICE"), shutil.which("soffice"), shutil.which("libreoffice"),
@@ -330,16 +515,46 @@ def unique(path):
     return "%s (%d)%s" % (base, n, ext)
 
 
+def convert(meta, path, a, converters, stamp):
+    """Γράφει το αρχείο σε προσωρινό φάκελο και επιστρέφει (κάλυψη, προσωρινό αρχείο, φάκελο)."""
+    wd = tempfile.mkdtemp()
+    if a.pdf:
+        out = to_pdf(build_html(meta), converters, wd)
+        text = pdf_text(out)
+    else:
+        out = os.path.join(wd, "page.md")
+        text = build_md(meta, stamp)
+        with open(out, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    return coverage(meta, text), out, wd
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("roots", nargs="*")
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--pdf", action="store_true", help="PDF αντί για Markdown")
+    ap.add_argument("--md-out", help="μία σελίδα σε αυτό το αρχείο Markdown, χωρίς διαγραφή")
     ap.add_argument("--cases")
     ap.add_argument("--manifest")
-    ap.add_argument("--log", default="qualex-to-pdf-log.tsv")
+    ap.add_argument("--log", default="qualex-se-md-log.tsv")
     a = ap.parse_args()
+    stamp = datetime.datetime.now().isoformat(timespec="seconds")
+    if a.md_out:
+        if len(a.roots) != 1 or a.pdf:
+            sys.exit("Με --md-out δίνεται μία σελίδα .htm και όχι --pdf.")
+        with open(a.roots[0], encoding="utf-8", errors="replace") as f:
+            meta = parse_qualex(f.read())
+        if meta is None:
+            sys.exit("Δεν είναι σελίδα άρθρου του Qualex.")
+        cov, out, wd = convert(meta, a.roots[0], a, None, stamp)
+        shutil.copyfile(out, a.md_out)
+        shutil.rmtree(wd, ignore_errors=True)
+        print("%s %.1f%% -> %s (προτεινόμενο όνομα: %s)" % ("ΟΚ" if cov >= MIN_COVERAGE else "ΧΑΜΗΛΗ ΚΑΛΥΨΗ",
+                                                            cov * 100, a.md_out, md_name(meta)))
+        sys.exit(0 if cov >= MIN_COVERAGE else 1)
     roots = a.roots or [DEFAULT_ROOT]
-    converters = find_converters()
+    converters = find_converters() if a.pdf else None
     manifest = load_manifest(a.manifest)
     log = open(a.log, "a", encoding="utf-8")
     done = skipped = failed = 0
@@ -360,32 +575,32 @@ def main():
                 log.write("\t".join((stamp, path, "", "", "στο manifest")) + "\n")
                 skipped += 1
                 continue
-            target = unique(os.path.join(os.path.dirname(path), pdf_name(meta)))
-            with tempfile.TemporaryDirectory() as wd:
-                try:
-                    pdf = to_pdf(build_html(meta), converters, wd)
-                    cov = coverage(meta, pdf_text(pdf))
-                except Exception as ex:
-                    print("αποτυχία:", path, ex)
-                    log.write("\t".join((stamp, path, target, "", "αποτυχία " + str(ex))) + "\n")
-                    failed += 1
-                    continue
-                ok = cov >= MIN_COVERAGE
-                print("%s %.1f%% %s -> %s" % ("ΟΚ" if ok else "ΧΑΜΗΛΗ ΚΑΛΥΨΗ", cov * 100,
-                                              os.path.basename(path), os.path.basename(target)))
-                status = "έλεγχος"
-                if ok and a.apply:
-                    shutil.copyfile(pdf, target)
-                    files = os.path.splitext(path)[0] + "_files"
-                    os.remove(path)
-                    if os.path.isdir(files):
-                        shutil.rmtree(files)
-                    status = "μετατράπηκε"
-                    done += 1
-                elif not ok:
-                    status = "χαμηλή κάλυψη"
-                    failed += 1
-                log.write("\t".join((stamp, path, target, "%.3f" % cov, status)) + "\n")
+            name = pdf_name(meta) if a.pdf else md_name(meta)
+            target = unique(os.path.join(os.path.dirname(path), name))
+            try:
+                cov, out, wd = convert(meta, path, a, converters, stamp)
+            except Exception as ex:
+                print("αποτυχία:", path, ex)
+                log.write("\t".join((stamp, path, target, "", "αποτυχία " + str(ex))) + "\n")
+                failed += 1
+                continue
+            ok = cov >= MIN_COVERAGE
+            print("%s %.1f%% %s -> %s" % ("ΟΚ" if ok else "ΧΑΜΗΛΗ ΚΑΛΥΨΗ", cov * 100,
+                                          os.path.basename(path), os.path.basename(target)))
+            status = "έλεγχος"
+            if ok and a.apply:
+                shutil.copyfile(out, target)
+                files = os.path.splitext(path)[0] + "_files"
+                os.remove(path)
+                if os.path.isdir(files):
+                    shutil.rmtree(files)
+                status = "μετατράπηκε"
+                done += 1
+            elif not ok:
+                status = "χαμηλή κάλυψη"
+                failed += 1
+            shutil.rmtree(wd, ignore_errors=True)
+            log.write("\t".join((stamp, path, target, "%.3f" % cov, status)) + "\n")
     log.close()
     print("μετατράπηκαν %d, παραλείφθηκαν %d, αποτυχίες %d%s" % (done, skipped, failed, "" if a.apply else " (χωρίς --apply)"))
 
