@@ -9,6 +9,11 @@
 του δίνει όνομα κατά τη μορφή των υπολοίπων άρθρων, «<Περιοδικό> <έτος> <Επώνυμο> -
 <Τίτλος>.md» (οδηγία του χρήστη της 1.10.2026, «Ας είναι markdown ό,τι βολεύει»).
 
+Με τον ίδιο τρόπο μετατρέπονται και οι αποφάσεις της Νομολογίας του Qualex (τίτλος σελίδας
+«Νομολογία | Qualex»), με τα στοιχεία δικαστηρίου, σύνθεσης και πηγής, την περίληψη και το
+τμήμα «Απόφαση», και όνομα «<Δικαστήριο> <αριθμός>-<έτος> - <Θέμα>.md». Αναγνωρίζονται και
+οι σελίδες που ανοίχτηκαν απευθείας και όχι από τα αποτελέσματα αναζήτησης.
+
 Το αρχείο γράφεται μόνο αν περιέχει τουλάχιστον το 90% των λέξεων πέντε και περισσότερων
 γραμμάτων του κειμένου της σελίδας. Με --apply το .htm και ο φάκελος «_files» του
 σβήνονται (στο G: του Google Drive πηγαίνουν στον κάδο, όπου μένουν τριάντα ημέρες).
@@ -116,51 +121,81 @@ def value_after(lines, label, start=0, stop=None):
     return ""
 
 
+CASE_FIELDS = (("Αριθμός:", "number"), ("Έτος:", "year"), ("Δικαστήριο:", "court"), ("Τόπος:", "place"),
+               ("Τμήμα Δικαστηρίου:", "section"), ("Σύνθεση:", "composition"), ("Φύση/Είδος:", "kind"),
+               ("Ημ. Δημοσίευσης:", "date"), ("Αρ. Λέξεων:", "words"))
+
+
 def parse_qualex(page):
+    """Σελίδα άρθρου (Αρθρογραφία) ή απόφασης (Νομολογία) του Qualex, αλλιώς None."""
     head = page[:20000]
-    if not re.search(r"<title>[^<]*\|\s*Qualex\s*</title>", head, re.I):
+    m = re.search(r"<title>\s*(Αρθρογραφία|Νομολογία)\s*\|\s*Qualex\s*</title>", head, re.I)
+    if not m:
         return None
+    case = m.group(1) == "Νομολογία"
     lines = text_lines(page)
-    try:
-        start = next(i for i, l in enumerate(lines) if l.startswith("Πίσω στα αποτελέσματα"))
-        end = lines.index("Κείμενο", start)
-    except (StopIteration, ValueError):
+    # Ο τίτλος ακολουθεί το «Πίσω στα αποτελέσματα … Πρόσφατες αναζητήσεις» όταν η σελίδα ανοίχτηκε
+    # από αναζήτηση, ή το σκέτο «Πρόσφατες αναζητήσεις» όταν ανοίχτηκε απευθείας.
+    start = next((i for i, l in enumerate(lines)
+                  if l.startswith("Πίσω στα αποτελέσματα") or l == "Πρόσφατες αναζητήσεις"), None)
+    if start is None:
         return None
-    meta = {"title": lines[start + 1], "author": value_after(lines, "Συγγραφέας:", start, end),
-            "year": value_after(lines, "Έτος:", start, end), "kind": value_after(lines, "Είδος:", start, end),
-            "date": value_after(lines, "Ημ. Δημοσίευσης:", start, end),
-            "words": value_after(lines, "Αρ. Λέξεων:", start, end)}
-    # Η πηγή είναι οι γραμμές μεταξύ «Μέσο Δημοσίευσης:» και «Ημ. Δημοσίευσης:».
+    try:
+        end = lines.index("Απόφαση" if case else "Κείμενο", start)
+    except ValueError:
+        return None
+    meta = {"case": case, "title": lines[start + 1], "author": "", "kind": ""}
+    if case:
+        for label, key in CASE_FIELDS:
+            meta[key] = value_after(lines, label, start, end)
+        meta["court_full"] = " ".join(x for x in (meta["court"], meta["place"]) if x)
+        if meta["section"]:
+            meta["court_full"] += ", τμήμα " + meta["section"]
+    else:
+        meta.update({"author": value_after(lines, "Συγγραφέας:", start, end),
+                     "year": value_after(lines, "Έτος:", start, end), "kind": value_after(lines, "Είδος:", start, end),
+                     "date": value_after(lines, "Ημ. Δημοσίευσης:", start, end),
+                     "words": value_after(lines, "Αρ. Λέξεων:", start, end)})
+    # Η πηγή είναι οι γραμμές μεταξύ «Μέσο Δημοσίευσης:» και της επόμενης ετικέτας.
     src = []
     if "Μέσο Δημοσίευσης:" in lines[start:end]:
         i = lines.index("Μέσο Δημοσίευσης:", start, end) + 1
-        while i < end and lines[i] != "Ημ. Δημοσίευσης:" and not lines[i].endswith(":"):
+        while i < end and not lines[i].endswith(":") and not lines[i].startswith("Εμφάνιση "):
             src.append(lines[i])
             i += 1
     meta["medium"] = " ".join(s for s in src if s.upper() != "ΤΝΠ QUALEX")
     meta["source"] = src
-    # Περίληψη.
+    # Περίληψη: στις αποφάσεις από το δικό της τμήμα, που κρατά και ό,τι κρύβει το «Εμφάνιση περισσότερων».
     summ = []
-    if "Περίληψη" in lines[start:end]:
+    abstract = section_by_label(page, "CaseLawAbstract") if case else None
+    if abstract:
+        summ = [l for l in text_lines(abstract) if l != "Περίληψη" and not l.startswith("Εμφάνιση ")]
+    elif "Περίληψη" in lines[start:end]:
         i = lines.index("Περίληψη", start, end) + 1
         while i < end and not lines[i].startswith("Εμφάνιση "):
             summ.append(lines[i])
             i += 1
     meta["summary"] = summ
-    # Σχετική νομοθεσία και νομολογία: μετά τις επικεφαλίδες τους ως το «Κείμενο».
+    # Σχετική νομοθεσία, νομολογία και διοικητικά έγγραφα: μετά τις επικεφαλίδες τους ως το τέλος.
     rel = []
-    heads = [k for k in range(start, end) if re.match(r"Σχετική (Νομοθεσία|Νομολογία) \(\d+\)$", lines[k])]
+    heads = [k for k in range(start, end)
+             if re.match(r"Σχετικ[ήά] (Νομοθεσία|Νομολογία|Διοικητικά Έγγραφα|Αρθρογραφία) \(\d+\)$", lines[k])]
     if heads:
         rel = [l for l in lines[heads[-1] + 1:end] if not l.startswith("Εμφάνιση ")]
     meta["related_heads"] = [lines[k] for k in heads]
     meta["related"] = rel
-    body = section_by_label(page, "ArticleContent")
+    label = "CaseLawContent" if case else "ArticleContent"
+    body = section_by_label(page, label)
     if not body:
         return None
-    body = re.sub(r'(?is)<h2[^>]*id="ArticleContent"[^>]*>.*?</h2>', "", body)
+    body = re.sub(r'(?is)<h2[^>]*id="%s"[^>]*>.*?</h2>' % label, "", body)
     meta["body_html"] = sanitize(body)
     meta["body_text"] = " ".join(text_lines(body))
     return meta
+
+
+def join_and(items):
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " και " + items[-1]
 
 
 # Όνομα αρχείου
@@ -168,7 +203,8 @@ def parse_qualex(page):
 def surname(author):
     name = author.split(",")[0].strip()
     parts = name.split()
-    return parts[-1] if parts else ""
+    # Συλλογικός συγγραφέας («Ερευνητική ομάδα …») δεν δίνει επώνυμο.
+    return parts[-1] if 0 < len(parts) <= 3 else ""
 
 
 def short_title(title, limit=60):
@@ -181,6 +217,8 @@ def short_title(title, limit=60):
 
 
 def pdf_name(meta):
+    if meta.get("case"):
+        return case_name(meta) + ".pdf"
     medium = meta["medium"]
     m = re.match(r"\s*([^,]+?)\s*,\s*([^,]*?)\s*(?:,|$)", medium)
     journal = m.group(1).strip() if m else ""
@@ -203,17 +241,16 @@ def build_html(meta):
              "<style>body{font-family:'Times New Roman',serif;font-size:12pt;line-height:1.4}"
              "h1{font-size:15pt}p.m{margin:0}</style></head><body>",
              "<h1>%s</h1>" % e(meta["title"])]
-    for label, key in (("Συγγραφέας", "author"), ("Είδος", "kind"), ("Ημ. δημοσίευσης", "date"), ("Αρ. λέξεων", "words")):
-        if meta.get(key):
-            parts.append("<p class='m'><b>%s:</b> %s</p>" % (label, e(meta[key])))
-        if key == "author" and src:
-            parts.append("<p class='m'><b>Πηγή:</b> %s</p>" % e(src))
+    for label, key in header_fields(meta):
+        value = src if key is None else meta.get(key, "")
+        if value:
+            parts.append("<p class='m'><b>%s:</b> %s</p>" % (label, e(value)))
     if meta["summary"]:
         parts.append("<h2>Περίληψη</h2><p>%s</p>" % e(" ".join(meta["summary"])))
     if meta["related"]:
-        parts.append("<h2>%s</h2>" % e(" και ".join(meta["related_heads"])))
+        parts.append("<h2>%s</h2>" % e(join_and(meta["related_heads"])))
         parts.extend("<p class='m'>%s</p>" % e(r) for r in meta["related"])
-    parts.append("<h2>Κείμενο</h2>")
+    parts.append("<h2>%s</h2>" % ("Απόφαση" if meta.get("case") else "Κείμενο"))
     parts.append(meta["body_html"])
     parts.append("</body></html>")
     return "\n".join(parts)
@@ -365,8 +402,7 @@ def page_markers(blocks):
 def build_md(meta, stamp):
     src = ", ".join(s.replace(" , ", ", ") for s in meta["source"])
     lines = ["# " + md_inline(meta["title"]), ""]
-    for label, key in (("Συγγραφέας", "author"), ("Πηγή", None), ("Είδος", "kind"),
-                       ("Ημ. δημοσίευσης", "date"), ("Αρ. λέξεων", "words")):
+    for label, key in header_fields(meta):
         value = src if key is None else meta.get(key, "")
         if value:
             lines += ["**%s:** %s" % (label, md_inline(value)), ""]
@@ -388,16 +424,35 @@ def build_md(meta, stamp):
     if meta["summary"]:
         lines += ["## Περίληψη", "", md_inline(" ".join(meta["summary"])), ""]
     if meta["related"]:
-        lines += ["## " + " και ".join(meta["related_heads"]), ""]
+        lines += ["## " + join_and(meta["related_heads"]), ""]
         for r in meta["related"]:
             lines += [md_inline(r), ""]
-    lines += ["## Κείμενο", ""]
+    lines += ["## " + ("Απόφαση" if meta.get("case") else "Κείμενο"), ""]
     for b in blocks:
         lines += [b, ""]
     return "\n".join(lines).rstrip() + "\n"
 
 
+def header_fields(meta):
+    if meta.get("case"):
+        return (("Δικαστήριο", "court_full"), ("Σύνθεση", "composition"), ("Φύση/Είδος", "kind"),
+                ("Πηγή", None), ("Ημ. δημοσίευσης", "date"), ("Αρ. λέξεων", "words"))
+    return (("Συγγραφέας", "author"), ("Πηγή", None), ("Είδος", "kind"),
+            ("Ημ. δημοσίευσης", "date"), ("Αρ. λέξεων", "words"))
+
+
+def case_name(meta):
+    """«ΜΔΠρΡοδ 746/2022 Πράξη …» -> «ΜΔΠρΡοδ 746-2022 - Πράξη …»."""
+    m = re.match(r"(.*?\d+\s*/\s*(?:19|20)\d\d)\b\s*[-–]?\s*(.*)$", meta["title"])
+    ident, rest = (m.group(1), m.group(2)) if m else (meta["title"], "")
+    ident = re.sub(r"\s*/\s*", "-", ident)
+    ident = re.sub(r'[\\/:*?"<>|]', "-", ident).strip()
+    return ident + (" - " + short_title(rest) if rest else "")
+
+
 def md_name(meta):
+    if meta.get("case"):
+        return case_name(meta) + ".md"
     return pdf_name(meta)[:-4] + ".md"
 
 
@@ -546,7 +601,7 @@ def main():
         with open(a.roots[0], encoding="utf-8", errors="replace") as f:
             meta = parse_qualex(f.read())
         if meta is None:
-            sys.exit("Δεν είναι σελίδα άρθρου του Qualex.")
+            sys.exit("Δεν είναι σελίδα άρθρου ή απόφασης του Qualex.")
         cov, out, wd = convert(meta, a.roots[0], a, None, stamp)
         shutil.copyfile(out, a.md_out)
         shutil.rmtree(wd, ignore_errors=True)
